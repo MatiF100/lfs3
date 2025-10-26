@@ -7,6 +7,8 @@
 )]
 #![allow(static_mut_refs)]
 
+use alloc::format;
+use alloc::string::ToString;
 // MEMORY LAYOUT
 /*
     0x10000 OFFSET, 0xAA0000 BYTES -> PROGRAM
@@ -17,6 +19,7 @@
 use defmt::{error, info};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_storage::ReadStorage;
@@ -39,10 +42,10 @@ use esp_println as _;
 use esp_radio::wifi::Config;
 use esp_storage::FlashStorage;
 
-use littlefs2::consts::{U8, U64, U256};
-use littlefs2::io::SeekFrom;
-use littlefs2::{driver::Storage, fs::Filesystem};
-use littlefs2::{path, ram_storage};
+use littlefs2::consts::{U64, U256};
+use littlefs2::fs::Filesystem;
+use littlefs2::path;
+use littlefs2::path::Path;
 
 use serde::{Deserialize, Serialize};
 use smart_leds::SmartLedsWrite;
@@ -58,17 +61,20 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 extern crate alloc;
 const LED_LEVEL: u8 = 10;
 const SENSOR_COUNT: usize = 8;
-static SENSOR_CHANNEL: Watch<CriticalSectionRawMutex, [u16; SENSOR_COUNT], 2> = Watch::new();
-static CONTROL_CHANNEL: Watch<CriticalSectionRawMutex, Control, 2> = Watch::new();
+static SENSOR_WATCH: Watch<CriticalSectionRawMutex, [u16; SENSOR_COUNT], 2> = Watch::new();
+static CONTROL_WATCH: Watch<CriticalSectionRawMutex, Control, 2> = Watch::new();
+static TELEMETRY_CHANNEL: Channel<CriticalSectionRawMutex, TelemetryPacket, 1> =
+    Channel::<CriticalSectionRawMutex, TelemetryPacket, 1>::new();
+
 const MAX_POSITION: u16 = SENSOR_COUNT as u16 * 1000;
 const OTHER_STACK_SIZE: usize = 4 * 1024;
 static mut OTHER_STACK: Stack<OTHER_STACK_SIZE> = Stack::new();
 
 const BASE_OFFSET: usize = 0xab0000;
 
-struct StorageWrapper<'a>{
+struct StorageWrapper<'a> {
     storage: FlashStorage<'a>,
-    offset: usize
+    offset: usize,
 }
 impl littlefs2::driver::Storage for StorageWrapper<'_> {
     const READ_SIZE: usize = 4;
@@ -89,14 +95,20 @@ impl littlefs2::driver::Storage for StorageWrapper<'_> {
         match self.storage.read((self.offset + off) as u32, buf) {
             //Ok(_) => {info!("{}", buf); Ok(buf.iter().position(|v| *v == 0xff).unwrap_or(buf.len()))},
             Ok(_) => Ok(buf.iter().position(|v| *v == 0xff).unwrap_or(buf.len())),
-            Err(e) => Err(littlefs2::io::Error::INVALID),
+            Err(e) => {
+                error!("{}", e);
+                Err(littlefs2::io::Error::INVALID)
+            }
         }
     }
 
     fn write(&mut self, off: usize, data: &[u8]) -> littlefs2::io::Result<usize> {
         match self.storage.write((self.offset + off) as u32, data) {
             Ok(_) => Ok(data.len()),
-            Err(e) => Err(littlefs2::io::Error::INVALID),
+            Err(e) => {
+                error!("{}", e);
+                Err(littlefs2::io::Error::INVALID)
+            }
         }
     }
 
@@ -107,7 +119,10 @@ impl littlefs2::driver::Storage for StorageWrapper<'_> {
             .erase((self.offset + off) as u32, (BASE_OFFSET + off + len) as u32)
         {
             Ok(_) => Ok(0),
-            Err(e) => Err(littlefs2::io::Error::INVALID),
+            Err(e) => {
+                error!("{}", e);
+                Err(littlefs2::io::Error::INVALID)
+            }
         }
     }
 }
@@ -145,50 +160,12 @@ async fn main(spawner: Spawner) {
 
     info!("Embassy initialized!");
 
-    let mut storage = StorageWrapper{
-        storage: FlashStorage::new(peripherals.FLASH),
-        offset: BASE_OFFSET,
-    };
-
-    /*let format_err = Filesystem::format(&mut storage);
-    if let Err(e) = format_err{
-        info!("{:?}", e.code());
-    }
-    */
-    // must allocate state statically before use
-    let mut alloc = Filesystem::allocate();
-    let mut fs = Filesystem::mount(&mut alloc, &mut storage).unwrap();
-
-    let example_exist = fs.exists(path!("example.txt"));
-
-    let mut buf = [0u8; 11];
-    let o = fs.open_file_with_options_and_then(
-        |options| options.read(true).write(true).create(true).append(true),
-        path!("exampl.txt"),
-        |file| {
-            if !example_exist{
-
-            let err = file.write(b"Why is black smoke coming out?!");
-            match err {
-                Ok(v) => info!("{}", v),
-                Err(e) => error!("{}", e.code()),
-            }
-            }
-            file.seek(SeekFrom::End(-24)).unwrap();
-            file.read(&mut buf).unwrap();
-            //assert_eq!(file.read(&mut buf)?, 11);
-            Ok(())
-        },
-    );
-    if let Err(o) = o {
-        info!("{:?}", o.code());
-    }
-    info!("{}", buf);
-    info!("example: {}", fs.exists(path!("example.txt")));
-
     let rng = esp_hal::rng::Rng::new();
-    let timer1 = TimerGroup::new(peripherals.TIMG0);
+    let _timer1 = TimerGroup::new(peripherals.TIMG0);
     let wifi_init = esp_radio::init().expect("Failed to initialize WIFI/BLE controller");
+
+    let mut session: [u8; 16] = [0; 16];
+    rng.read(&mut session);
 
     let mut led = {
         let freq = Rate::from_khz(80000);
@@ -214,14 +191,31 @@ async fn main(spawner: Spawner) {
 
     //let fs = fatfs::FileSystem::new(disk, options);
 
-    let sensor_comm = SENSOR_CHANNEL.sender();
-    let mut sensor_rcv = SENSOR_CHANNEL.receiver().unwrap();
+    let sensor_comm = SENSOR_WATCH.sender();
+    let mut sensor_rcv = SENSOR_WATCH.receiver().unwrap();
 
-    let mut control_rcv = CONTROL_CHANNEL.receiver().unwrap();
+    let mut control_rcv = CONTROL_WATCH.receiver().unwrap();
     // TODO: Spawn some tasks
     let _ = spawner;
 
     spawner.spawn(read_sensors()).unwrap();
+    spawner
+        .spawn(telemetry(peripherals.FLASH, session))
+        .unwrap();
+
+    let tele_sender = TELEMETRY_CHANNEL.sender();
+    tele_sender
+        .send(TelemetryPacket {
+            timestamp: 1,
+            temperature: 0.0,
+        })
+        .await;
+    tele_sender
+        .send(TelemetryPacket {
+            timestamp: 2,
+            temperature: 1.0,
+        })
+        .await;
 
     let mut pwm = Ledc::new(peripherals.LEDC);
     pwm.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -571,12 +565,12 @@ fn get_position(values: &[u16; SENSOR_COUNT], last_position: u16) -> u16 {
 #[embassy_executor::task]
 async fn read_sensors() {
     // Variables
-    let mut sensor_rcv = SENSOR_CHANNEL.receiver().unwrap();
-    let control_comm = CONTROL_CHANNEL.sender();
-    let mut control = Control::default();
+    let mut sensor_rcv = SENSOR_WATCH.receiver().unwrap();
+    let control_comm = CONTROL_WATCH.sender();
+    let control = Control::default();
 
     loop {
-        let pin_val = sensor_rcv.changed().await;
+        let _pin_val = sensor_rcv.changed().await;
 
         // Calculate controls
 
@@ -585,19 +579,59 @@ async fn read_sensors() {
 }
 
 #[embassy_executor::task]
-async fn telemetry(
-    flash: peripherals::FLASH<'static>
-) {
-    // Variables
-    let mut sensor_rcv = SENSOR_CHANNEL.receiver().unwrap();
-    let control_comm = CONTROL_CHANNEL.sender();
-    let mut control = Control::default();
+async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
+    info!("Starting telemetry");
+    let rcv = TELEMETRY_CHANNEL.receiver();
+    let mut storage = StorageWrapper {
+        storage: FlashStorage::new(flash).multicore_auto_park(),
+        offset: BASE_OFFSET,
+    };
+
+    if !Filesystem::is_mountable(&mut storage) {
+        let format_err = Filesystem::format(&mut storage);
+        if let Err(e) = format_err {
+            info!("{:?}", e.code());
+        }
+    }
+    // must allocate state statically before use
+    let mut alloc = Filesystem::allocate();
+    let fs = Filesystem::mount(&mut alloc, &mut storage).unwrap();
+
+    let mut telemetry_file = Default::default();
+
+    let meta = fs.open_file_with_options_and_then(
+        |o| o.read(true).write(true).create(true),
+        path!("last.txt"),
+        |file| {
+            let mut ver = [0; 1];
+            if file.is_empty().is_ok_and(|v| !v) {
+                file.read(&mut ver)?;
+            }
+            info!("{}", ver);
+            file.write(&[ver[0] + 1])?;
+            telemetry_file = format!("telemetry_{}.csv\0", ver[0]);
+            Ok(())
+        },
+    );
+    if meta.is_err() {
+        telemetry_file = "telemetry.csv\0".to_string();
+    }
 
     loop {
-        let pin_val = sensor_rcv.changed().await;
-
-        // Calculate controls
-
-        control_comm.send(control);
+        let telemetry = rcv.receive().await;
+        let mut wrt = serde_csv_core::Writer::new();
+        let mut buf = [0; 128];
+        wrt.serialize(&telemetry, &mut buf).unwrap();
+        let e = fs.open_file_with_options_and_then(
+            |o| o.read(true).write(true).append(true).create(true),
+            Path::from_str_with_nul(&telemetry_file).unwrap(),
+            |file| {
+                file.write(&buf)?;
+                Ok(())
+            },
+        );
+        if let Err(e) = e {
+            error!("{}", e.code());
+        }
     }
 }
