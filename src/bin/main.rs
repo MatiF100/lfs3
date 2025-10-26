@@ -7,6 +7,8 @@
 )]
 #![allow(static_mut_refs)]
 
+use core::net::Ipv4Addr;
+
 use alloc::format;
 use alloc::string::ToString;
 // MEMORY LAYOUT
@@ -18,6 +20,9 @@ use alloc::string::ToString;
 //
 use defmt::{error, info};
 use embassy_executor::Spawner;
+use embassy_futures::select::Either;
+use embassy_net::tcp::TcpSocket;
+use embassy_net::{Config, IpListenEndpoint, Ipv4Cidr, Runner, StackResources, StaticConfigV4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::watch::Watch;
@@ -39,11 +44,15 @@ use esp_hal::timer::systimer::SystemTimer;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal_smartled::{SmartLedsAdapter, smart_led_buffer};
 use esp_println as _;
-use esp_radio::wifi::Config;
+use esp_radio::Controller;
+use esp_radio::wifi::{
+    AccessPointConfig, ClientConfig, ModeConfig, WifiApState, WifiController, WifiDevice, WifiEvent,
+};
 use esp_storage::FlashStorage;
 
 use littlefs2::consts::{U64, U256};
 use littlefs2::fs::Filesystem;
+use littlefs2::io::SeekFrom;
 use littlefs2::path;
 use littlefs2::path::Path;
 
@@ -71,6 +80,9 @@ const OTHER_STACK_SIZE: usize = 4 * 1024;
 static mut OTHER_STACK: Stack<OTHER_STACK_SIZE> = Stack::new();
 
 const BASE_OFFSET: usize = 0xab0000;
+
+const SSID: &str = "Xiaomi_AAD9";
+const PASSWORD: &str = "fesz987654321";
 
 struct StorageWrapper<'a> {
     storage: FlashStorage<'a>,
@@ -139,6 +151,15 @@ struct Control {
     calibrated: bool,
 }
 
+macro_rules! mk_static {
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
+
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -162,7 +183,10 @@ async fn main(spawner: Spawner) {
 
     let rng = esp_hal::rng::Rng::new();
     let _timer1 = TimerGroup::new(peripherals.TIMG0);
-    let wifi_init = esp_radio::init().expect("Failed to initialize WIFI/BLE controller");
+    let wifi_init = &*mk_static!(
+        Controller<'static>,
+        esp_radio::init().expect("Failed to initialize WIFI/BLE controller")
+    );
 
     let mut session: [u8; 16] = [0; 16];
     rng.read(&mut session);
@@ -174,18 +198,85 @@ async fn main(spawner: Spawner) {
     };
     led.write(brightness([RED].into_iter(), LED_LEVEL)).unwrap();
 
+    let (mut wifi_controller, interfaces) = esp_radio::wifi::new(
+        &wifi_init,
+        peripherals.WIFI,
+        esp_radio::wifi::Config::default(),
+    )
+    .expect("Failed to initialize WIFI controller");
+
+    let wifi_sta_device = interfaces.sta;
+    let wifi_ap_device = interfaces.ap;
+
+    let config = Config::dhcpv4(Default::default());
+
+    let seed = 1234; // change this
+
+    let ap_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
+        address: Ipv4Cidr::new(Ipv4Addr::new(192, 168, 99, 1), 24),
+        gateway: Some(Ipv4Addr::new(192, 168, 99, 1)),
+        dns_servers: Default::default(),
+    });
+    let sta_config = embassy_net::Config::dhcpv4(Default::default());
+
+    let (ap_stack, ap_runner) = embassy_net::new(
+        wifi_ap_device,
+        ap_config,
+        mk_static!(StackResources<3>, StackResources::<3>::new()),
+        seed,
+    );
+    let (sta_stack, sta_runner) = embassy_net::new(
+        wifi_sta_device,
+        sta_config,
+        mk_static!(StackResources<4>, StackResources::<4>::new()),
+        seed,
+    );
+
+    let client_config = ModeConfig::ApSta(
+        ClientConfig::default()
+            .with_ssid(SSID.into())
+            .with_password(PASSWORD.into()),
+        AccessPointConfig::default().with_ssid("esp-radio".into()),
+    );
+    wifi_controller.set_config(&client_config).unwrap();
+
+    spawner.spawn(connection(wifi_controller)).ok();
+    spawner.spawn(net_task(ap_runner)).ok();
+    spawner.spawn(net_task(sta_runner)).ok();
+
+    let sta_address = loop {
+        if let Some(config) = sta_stack.config_v4() {
+            let address = config.address.address();
+            info!("Got IP: {}", address);
+            break address;
+        }
+        info!("Waiting for IP...");
+        Timer::after(Duration::from_millis(500)).await;
+    };
+    loop {
+        if ap_stack.is_link_up() {
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+    info!("Connect to the AP `esp-radio` and point your browser to http://192.168.2.1:8080/");
+    info!("Use a static IP in the range 192.168.2.2 .. 192.168.2.255, use gateway 192.168.2.1");
+    info!(
+        "Or connect to the ap `{}` and point your browser to http://{}:8080/",
+        SSID, sta_address
+    );
+
+
+    spawner.spawn(run_webserver(ap_stack, sta_stack)).unwrap();
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
         software_interrupt.software_interrupt0,
         software_interrupt.software_interrupt1,
         unsafe { &mut OTHER_STACK },
         move || {
-            let (mut _wifi_controller, _interfaces) =
-                esp_radio::wifi::new(&wifi_init, peripherals.WIFI, Config::default())
-                    .expect("Failed to initialize WIFI controller");
-
             info!("Info from 2nd core!");
-            loop {}
+
+            //loop {}
         },
     );
 
@@ -608,6 +699,7 @@ async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
                 file.read(&mut ver)?;
             }
             info!("{}", ver);
+            file.seek(SeekFrom::Start(0))?;
             file.write(&[ver[0] + 1])?;
             telemetry_file = format!("telemetry_{}.csv\0", ver[0]);
             Ok(())
@@ -634,4 +726,213 @@ async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
             error!("{}", e.code());
         }
     }
+}
+
+#[embassy_executor::task]
+async fn connection(mut controller: WifiController<'static>) {
+    info!("start connection task");
+    info!("Device capabilities: {:?}", controller.capabilities());
+
+    info!("Starting wifi");
+    controller.start_async().await.unwrap();
+    info!("Wifi started!");
+
+    loop {
+        match esp_radio::wifi::ap_state() {
+            WifiApState::Started => {
+                info!("About to connect...");
+
+                match controller.connect_async().await {
+                    Ok(_) => {
+                        // wait until we're no longer connected
+                        controller.wait_for_event(WifiEvent::StaDisconnected).await;
+                        info!("STA disconnected");
+                    }
+                    Err(e) => {
+                        info!("Failed to connect to wifi: {}", e);
+                        Timer::after(Duration::from_millis(5000)).await
+                    }
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+#[embassy_executor::task(pool_size = 2)]
+async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn run_webserver(
+    mut ap_stack: embassy_net::Stack<'static>,
+    mut sta_stack: embassy_net::Stack<'static>
+){
+    let mut ap_server_rx_buffer = [0; 1536];
+    let mut ap_server_tx_buffer = [0; 1536];
+    let mut sta_server_rx_buffer = [0; 1536];
+    let mut sta_server_tx_buffer = [0; 1536];
+    let mut sta_client_rx_buffer = [0; 1536];
+    let mut sta_client_tx_buffer = [0; 1536];
+
+    let mut ap_server_socket =
+        TcpSocket::new(ap_stack, &mut ap_server_rx_buffer, &mut ap_server_tx_buffer);
+    ap_server_socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
+
+    let mut sta_server_socket = TcpSocket::new(
+        sta_stack,
+        &mut sta_server_rx_buffer,
+        &mut sta_server_tx_buffer,
+    );
+    sta_server_socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
+
+    let mut sta_client_socket = TcpSocket::new(
+        sta_stack,
+        &mut sta_client_rx_buffer,
+        &mut sta_client_tx_buffer,
+    );
+    sta_client_socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
+    loop {
+        info!("Wait for connection...");
+        // FIXME: If connections are attempted on both sockets at the same time, we
+        // might end up dropping one of them. Might be better to spawn both
+        // accept() calls, or use fused futures? Note that we only attempt to
+        // serve one connection at a time, so we don't run out of ram.
+        let either_socket = embassy_futures::select::select(
+            ap_server_socket.accept(IpListenEndpoint {
+                addr: None,
+                port: 8080,
+            }),
+            sta_server_socket.accept(IpListenEndpoint {
+                addr: None,
+                port: 8080,
+            }),
+        )
+        .await;
+        let (r, server_socket) = match either_socket {
+            Either::First(r) => (r, &mut ap_server_socket),
+            Either::Second(r) => (r, &mut sta_server_socket),
+        };
+        info!("Connected...");
+
+        if let Err(e) = r {
+            info!("connect error: {:?}", e);
+            continue;
+        }
+
+        use embedded_io_async::Write;
+        let mut buffer = [0u8; 1024];
+        let mut pos = 0;
+        loop {
+            match server_socket.read(&mut buffer).await {
+                Ok(0) => {
+                    info!("AP read EOF");
+                    break;
+                }
+
+                Ok(len) => {
+                    let to_print =
+                        unsafe { core::str::from_utf8_unchecked(&buffer[..(pos + len)]) };
+
+                    if to_print.contains("\r\n\r\n") {
+                        info!("{}", to_print);
+                        break;
+                    }
+
+                    pos += len;
+                }
+                Err(e) => {
+                    info!("AP read error: {:?}", e);
+                    break;
+                }
+            };
+        }
+        if sta_stack.is_link_up() {
+            let remote_endpoint = (Ipv4Addr::new(142, 250, 185, 115), 80);
+            info!("connecting...");
+            let r = sta_client_socket.connect(remote_endpoint).await;
+            if let Err(e) = r {
+                info!("STA connect error: {:?}", e);
+                continue;
+            }
+
+            use embedded_io_async::Write;
+            let r = sta_client_socket
+                .write_all(b"GET / HTTP/1.0\r\nHost: www.mobile-j.de\r\n\r\n")
+                .await;
+
+            if let Err(e) = r {
+                info!("STA write error: {:?}", e);
+
+                let r = server_socket
+                    .write_all(
+                        b"HTTP/1.0 500 Internal Server Error\r\n\r\n\
+                        <html>\
+                            <body>\
+                                <h1>Hello Rust! Hello esp-radio! STA failed to send request.</h1>\
+                            </body>\
+                        </html>\r\n\
+                        ",
+                    )
+                    .await;
+                if let Err(e) = r {
+                    info!("AP write error: {:?}", e);
+                }
+            } else {
+                let r = sta_client_socket.flush().await;
+                if let Err(e) = r {
+                    info!("STA flush error: {:?}", e);
+                } else {
+                    info!("connected!");
+                    let mut buf = [0; 1024];
+                    loop {
+                        match sta_client_socket.read(&mut buf).await {
+                            Ok(0) => {
+                                info!("STA read EOF");
+                                break;
+                            }
+                            Ok(n) => {
+                                let r = server_socket.write_all(&buf[..n]).await;
+                                if let Err(e) = r {
+                                    info!("AP write error: {:?}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                info!("STA read error: {:?}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            sta_client_socket.close();
+        } else {
+            let r = server_socket
+                .write_all(
+                    b"HTTP/1.0 200 OK\r\n\r\n\
+                    <html>\
+                        <body>\
+                            <h1>Hello Rust! Hello esp-radio! STA is not connected.</h1>\
+                        </body>\
+                    </html>\r\n\
+                    ",
+                )
+                .await;
+            if let Err(e) = r {
+                info!("AP write error: {:?}", e);
+            }
+        }
+        let r = server_socket.flush().await;
+        if let Err(e) = r {
+            info!("AP flush error: {:?}", e);
+        }
+        Timer::after(Duration::from_millis(1000)).await;
+        server_socket.close();
+        Timer::after(Duration::from_millis(1000)).await;
+        server_socket.abort();
+    }
+
 }
