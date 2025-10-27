@@ -14,10 +14,6 @@ use picoserve::{
     routing::{get, get_service},
 };
 
-// ##################################################
-// #      DEFINICJA APLIKACJI WEBOWEJ (PICOSERVE)
-// ##################################################
-
 pub struct AppProps;
 
 impl AppBuilder for AppProps {
@@ -51,10 +47,6 @@ impl AppBuilder for AppProps {
             )
     }
 }
-
-// ##################################################
-// #      LOGIKA WEBSOCKET
-// ##################################################
 
 struct WebsocketEcho;
 
@@ -98,12 +90,6 @@ impl ws::WebSocketCallback for WebsocketEcho {
     }
 }
 
-// ##################################################
-// #      TASK URUCHAMIAJĄCY SERWER
-// ##################################################
-
-/// Task puli serwera Picoserve.
-/// Uruchamia `WEB_TASK_POOL_SIZE` instancji tego taska.
 #[task(pool_size = WEB_TASK_POOL_SIZE)]
 pub async fn web_task(
     id: usize,

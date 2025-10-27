@@ -4,17 +4,15 @@
 
 extern crate alloc;
 
-use alloc::format;
-use defmt::{info, warn}; // 'error' jest w panic_handler, ale 'warn' może się przydać
+use defmt::info; // 'error' jest w panic_handler, ale 'warn' może się przydać
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
-use esp_hal::analog::adc::{self, Adc, AdcConfig};
+use embassy_time::Duration;
+use esp_hal::analog::adc::{Adc, AdcConfig};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::ledc::channel::ChannelIFace;
 use esp_hal::ledc::timer::TimerIFace;
-use esp_hal::ledc::{self, LSGlobalClkSource, Ledc, LowSpeed, channel, timer};
-use esp_hal::peripherals;
+use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed, channel, timer};
 use esp_hal::rmt::Rmt;
 use esp_hal::system::Stack;
 use esp_hal::time::Rate;
@@ -26,7 +24,6 @@ use smart_leds::SmartLedsWrite;
 use smart_leds::brightness;
 use smart_leds::colors::RED;
 
-// --- Deklaracje modułów ---
 pub mod config;
 pub mod control;
 pub mod http_server;
@@ -34,12 +31,8 @@ pub mod network;
 pub mod state;
 pub mod storage;
 
-// --- Importy z modułów ---
 use crate::http_server::AppProps;
 
-// --- Zasoby globalne przeniesione z main.rs ---
-
-/// Makro do tworzenia statycznych zasobów
 #[macro_export]
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -50,21 +43,14 @@ macro_rules! mk_static {
     }};
 }
 
-/// Stos dla drugiego rdzenia
 static mut OTHER_STACK: Stack<{ config::OTHER_STACK_SIZE }> = Stack::new();
 
-/// # Główna funkcja aplikacji
-///
-/// Ta funkcja jest wywoływana z `main.rs` i przejmuje całą logikę aplikacji.
 pub async fn run(spawner: Spawner) {
-    // --- Inicjalizacja podstawowego systemu ---
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // --- Inicjalizacja alokatora sterty ---
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
-    // --- Inicjalizacja Embassy ---
     let timer0 = SystemTimer::new(peripherals.SYSTIMER);
     esp_rtos::start(timer0.alarm0);
 
@@ -73,15 +59,12 @@ pub async fn run(spawner: Spawner) {
 
     defmt::info!("Embassy initialized!");
 
-    // --- Uruchomienie głównej logiki aplikacji z lib.rs ---
     let rng = esp_hal::rng::Rng::new();
-    let timer1 = TimerGroup::new(peripherals.TIMG0);
+    let _timer1 = TimerGroup::new(peripherals.TIMG0);
 
-    // --- Sesja ---
     let mut session: [u8; 16] = [0; 16];
     rng.read(&mut session);
 
-    // --- SmartLED ---
     let mut led = {
         let freq = Rate::from_khz(config::SMARTLED_RMT_FREQ_KHZ);
         let rmt = Rmt::new(peripherals.RMT, freq).expect("Failed to init RMT");
@@ -90,11 +73,8 @@ pub async fn run(spawner: Spawner) {
     led.write(brightness([RED].into_iter(), config::LED_LEVEL))
         .unwrap();
 
-    // --- Sieć (Wi-Fi & Stosy IP) ---
-    // Ta funkcja zajmuje się inicjalizacją i spawnowaniem tasków sieciowych
-    let (ap_stack, sta_stack) = network::init_network(spawner, timer1, rng, peripherals.WIFI).await;
+    let (ap_stack, sta_stack) = network::init_network(spawner, peripherals.WIFI).await;
 
-    // --- Serwer WWW (Picoserve) ---
     let app = mk_static!(
         picoserve::AppRouter<AppProps>,
         http_server::AppProps.build_app()
@@ -110,21 +90,16 @@ pub async fn run(spawner: Spawner) {
         .keep_connection_alive()
     );
 
-    // Spawnowanie puli tasków Picoserve
-    // Używamy `sta_stack` zgodnie z oryginalnym kodem
     for id in 0..config::WEB_TASK_POOL_SIZE {
         spawner
             .spawn(http_server::web_task(id, sta_stack, app, pico_config))
             .unwrap();
     }
 
-    // Spawnowanie starego serwera WWW (jeśli nadal potrzebny)
-    // Zgodnie z oryginalnym kodem
     spawner
         .spawn(network::run_webserver(ap_stack, sta_stack))
         .unwrap();
 
-    // --- Drugi rdzeń ---
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
         software_interrupt.software_interrupt0,
@@ -136,18 +111,15 @@ pub async fn run(spawner: Spawner) {
         },
     );
 
-    // --- Kanały komunikacyjne ---
     let sensor_comm = state::SENSOR_WATCH.sender();
     let control_rcv = state::CONTROL_WATCH.receiver().unwrap();
     let tele_sender = state::TELEMETRY_CHANNEL.sender();
 
-    // --- Spawnowanie tasków pomocniczych ---
     spawner.spawn(control::read_sensors()).unwrap();
     spawner
         .spawn(storage::telemetry(peripherals.FLASH, session))
         .unwrap();
 
-    // --- Wysłanie testowych danych telemetrycznych ---
     tele_sender
         .send(state::TelemetryPacket {
             timestamp: 1,
@@ -161,15 +133,10 @@ pub async fn run(spawner: Spawner) {
         })
         .await;
 
-    // #################################################
-    // #      INICJALIZACJA PERYFERIÓW ROBOTA
-    // #################################################
-
-    // --- PWM dla silników ---
     let mut pwm = Ledc::new(peripherals.LEDC);
     pwm.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
-    let mut lstimer0 = mk_static!(
+    let lstimer0 = mk_static!(
         esp_hal::ledc::timer::Timer<LowSpeed>,
         pwm.timer::<LowSpeed>(timer::Number::Timer0)
     );
@@ -215,29 +182,21 @@ pub async fn run(spawner: Spawner) {
         })
         .expect("Failed to init PWM");
 
-    // --- Emiter czujników ---
-    let mut emiter = Output::new(peripherals.GPIO16, Level::High, OutputConfig::default());
+    let emiter = Output::new(peripherals.GPIO16, Level::High, OutputConfig::default());
 
-    // --- ADC i Piny czujników ---
     let mut adc_config = AdcConfig::new();
-    let mut sensor1 = adc_config.enable_pin(peripherals.GPIO9, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor2 = adc_config.enable_pin(peripherals.GPIO3, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor3 = adc_config.enable_pin(peripherals.GPIO8, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor4 = adc_config.enable_pin(peripherals.GPIO6, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor5 = adc_config.enable_pin(peripherals.GPIO10, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor6 = adc_config.enable_pin(peripherals.GPIO5, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor7 = adc_config.enable_pin(peripherals.GPIO4, config::SENSOR_ADC_ATTENUATION);
-    let mut sensor8 = adc_config.enable_pin(peripherals.GPIO7, config::SENSOR_ADC_ATTENUATION);
-    let mut adc = Adc::new(peripherals.ADC1, adc_config);
-
-    // #################################################
-    // #      URUCHOMIENIE GŁÓWNEJ PĘTLI STEROWANIA
-    // #################################################
+    let sensor1 = adc_config.enable_pin(peripherals.GPIO9, config::SENSOR_ADC_ATTENUATION);
+    let sensor2 = adc_config.enable_pin(peripherals.GPIO3, config::SENSOR_ADC_ATTENUATION);
+    let sensor3 = adc_config.enable_pin(peripherals.GPIO8, config::SENSOR_ADC_ATTENUATION);
+    let sensor4 = adc_config.enable_pin(peripherals.GPIO6, config::SENSOR_ADC_ATTENUATION);
+    let sensor5 = adc_config.enable_pin(peripherals.GPIO10, config::SENSOR_ADC_ATTENUATION);
+    let sensor6 = adc_config.enable_pin(peripherals.GPIO5, config::SENSOR_ADC_ATTENUATION);
+    let sensor7 = adc_config.enable_pin(peripherals.GPIO4, config::SENSOR_ADC_ATTENUATION);
+    let sensor8 = adc_config.enable_pin(peripherals.GPIO7, config::SENSOR_ADC_ATTENUATION);
+    let adc = Adc::new(peripherals.ADC1, adc_config);
 
     info!("All tasks spawned. Starting main control loop...");
 
-    // To wywołanie .await przejmuje kontrolę nad tym taskiem
-    // i staje się główną pętlą sterowania robota.
     control::run_control_loop(
         adc,
         sensor1,
@@ -257,7 +216,4 @@ pub async fn run(spawner: Spawner) {
         sensor_comm,
     )
     .await;
-
-    // Kod w tym miejscu nigdy nie zostanie wykonany,
-    // ponieważ `run_control_loop` zawiera nieskończoną pętlę.
 }

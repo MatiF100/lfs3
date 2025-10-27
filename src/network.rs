@@ -3,36 +3,21 @@
 use crate::config::*;
 use core::net::Ipv4Addr;
 use defmt::{info, warn};
-use embassy_executor::{Spawner, task};
+use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{
-    Config, IpListenEndpoint, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
-};
+use embassy_net::{IpListenEndpoint, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4};
 use embassy_time::{Duration, Timer};
 use esp_hal::peripherals;
-use esp_hal::timer::timg::TimerGroup;
 use esp_radio::Controller;
 use esp_radio::wifi::{
     AccessPointConfig, ClientConfig, ModeConfig, WifiApState, WifiController, WifiDevice, WifiEvent,
 };
 
-/// Inicjalizuje kontroler Wi-Fi, stosy sieciowe AP i STA oraz uruchamia
-/// odpowiednie taski do zarządzania siecią.
-///
-/// Zwraca stosy sieciowe (AP i STA), które mogą być następnie użyte
-/// przez serwery WWW.
 pub async fn init_network(
     spawner: Spawner,
-    timer_group: TimerGroup<'static, peripherals::TIMG0<'static>>,
-    rng: esp_hal::rng::Rng,
     wifi_peripheral: peripherals::WIFI<'static>,
 ) -> (Stack<'static>, Stack<'static>) {
-    // Te peryferia są potrzebne do inicjalizacji esp_radio,
-    // nawet jeśli nie są bezpośrednio używane (są 'consumed').
-    let _ = timer_group;
-    let _ = rng;
-
     let wifi_init = &*crate::mk_static!(
         Controller<'static>,
         esp_radio::init().expect("Failed to initialize WIFI/BLE controller")
@@ -76,7 +61,6 @@ pub async fn init_network(
     );
     wifi_controller.set_config(&client_config).unwrap();
 
-    // Spawnowanie tasków sieciowych
     spawner.spawn(connection(wifi_controller)).ok();
     spawner.spawn(net_task(ap_runner)).ok();
     spawner.spawn(net_task(sta_runner)).ok();
@@ -92,7 +76,6 @@ pub async fn init_network(
         Timer::after(Duration::from_millis(500)).await;
     };
 
-    // Oczekiwanie na podniesienie linku AP
     info!("Waiting for AP link up...");
     loop {
         if ap_stack.is_link_up() {
@@ -114,8 +97,7 @@ pub async fn init_network(
     (ap_stack, sta_stack)
 }
 
-/// Task zarządzający połączeniem Wi-Fi (start, connect, reconnect).
-#[task]
+#[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>) {
     info!("Start connection task");
     info!("Device capabilities: {:?}", controller.capabilities());
@@ -141,24 +123,21 @@ async fn connection(mut controller: WifiController<'static>) {
                     }
                 }
             }
-            _ => return, // Stan AP inny niż 'Started'
+            _ => return,
         }
     }
 }
 
-/// Task puli dla runnerów embassy-net (jeden dla AP, jeden dla STA).
-#[task(pool_size = 2)]
+#[embassy_executor::task(pool_size = 2)]
 async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
 
-/// Task uruchamiający stary serwer WWW (ten z `main.rs`).
-/// Zachowany dla kompatybilności, Picoserve jest w `http_server.rs`.
-#[task]
+#[embassy_executor::task]
 #[allow(clippy::too_many_lines)] // Ten task jest duży i jest przykładem
 pub async fn run_webserver(
-    mut ap_stack: embassy_net::Stack<'static>,
-    mut sta_stack: embassy_net::Stack<'static>,
+    ap_stack: embassy_net::Stack<'static>,
+    sta_stack: embassy_net::Stack<'static>,
 ) {
     let mut ap_server_rx_buffer = [0; TCP_BUFFER_SIZE];
     let mut ap_server_tx_buffer = [0; TCP_BUFFER_SIZE];

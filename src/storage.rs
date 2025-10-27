@@ -16,12 +16,6 @@ use littlefs2::io::{Result as LfsResult, SeekFrom};
 use littlefs2::path;
 use littlefs2::path::Path;
 
-// ##################################################
-// #      DEFINICJA WRAPPERA STORAGE DLA LITTLEFS
-// ##################################################
-
-/// Wrapper dla `FlashStorage` z `esp_storage`, implementujący
-/// trait `littlefs2::driver::Storage`.
 pub struct StorageWrapper<'a> {
     pub storage: FlashStorage<'a>,
     pub offset: usize,
@@ -71,12 +65,6 @@ impl littlefs2::driver::Storage for StorageWrapper<'_> {
     }
 }
 
-// ##################################################
-// #      TASK OBSŁUGI TELEMETRII I ZAPISU
-// ##################################################
-
-/// Task odbierający dane telemetryczne z kanału `TELEMETRY_CHANNEL`
-/// i zapisujący je do pliku na systemie plików LittleFS.
 #[task]
 pub async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
     info!("Starting telemetry task");
@@ -94,13 +82,11 @@ pub async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
         }
     }
 
-    // Alokacja statyczna dla systemu plików
     let mut alloc = Filesystem::allocate();
     let fs = Filesystem::mount(&mut alloc, &mut storage).unwrap();
 
     let mut telemetry_file = Default::default();
 
-    // Zarządzanie wersjonowaniem plików telemetrycznych
     let meta = fs.open_file_with_options_and_then(
         |o| o.read(true).write(true).create(true),
         path!("config.txt"),
@@ -139,16 +125,13 @@ pub async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
         telemetry_file.trim_end_matches('\0')
     );
 
-    // Pętla główna zapisu telemetrii
     loop {
         let telemetry = rcv.receive().await;
         let mut wrt = serde_csv_core::Writer::new();
         let mut buf = [0; 128];
 
-        // Serializuj do CSV
         wrt.serialize(&telemetry, &mut buf).unwrap();
 
-        // Zapisz do pliku
         let e = fs.open_file_with_options_and_then(
             |o| o.read(true).write(true).append(true).create(true),
             Path::from_str_with_nul(&telemetry_file).unwrap(),
