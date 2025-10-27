@@ -6,7 +6,9 @@
     holding buffers for the duration of a data transfer."
 )]
 #![allow(static_mut_refs)]
+#![feature(impl_trait_in_assoc_type)]
 
+use core::fmt::Debug;
 use core::net::Ipv4Addr;
 
 use alloc::format;
@@ -56,6 +58,9 @@ use littlefs2::io::SeekFrom;
 use littlefs2::path;
 use littlefs2::path::Path;
 
+use picoserve::{AppBuilder, AppRouter};
+use picoserve::response::ws;
+use picoserve::routing::{get, get_service};
 use serde::{Deserialize, Serialize};
 use smart_leds::SmartLedsWrite;
 use smart_leds::brightness;
@@ -151,6 +156,11 @@ struct Control {
     calibrated: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+struct LFConfig {
+    telemetry_version: usize,
+}
+
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -163,6 +173,76 @@ macro_rules! mk_static {
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
+
+struct AppProps;
+
+impl AppBuilder for AppProps {
+    type PathRouter = impl picoserve::routing::PathRouter;
+
+    fn build_app(self) -> picoserve::Router<Self::PathRouter> {
+        picoserve::Router::new()
+            .route(
+                "/",
+                get_service(picoserve::response::File::html(include_str!("index.html"))),
+            )
+            .route(
+                "/index.css",
+                get_service(picoserve::response::File::css(include_str!("index.css"))),
+            )
+            .route(
+                "/index.js",
+                get_service(picoserve::response::File::javascript(include_str!(
+                    "index.js"
+                ))),
+            )
+            .route(
+                "/ws",
+                get(|upgrade: picoserve::response::WebSocketUpgrade| {
+                    upgrade.on_upgrade(WebsocketEcho).with_protocol("echo")
+                }),
+            )
+    }
+}
+struct WebsocketEcho;
+impl ws::WebSocketCallback for WebsocketEcho {
+    async fn run<R: embedded_io_async::Read, W: embedded_io_async::Write<Error = R::Error>>(
+        self,
+        mut rx: ws::SocketRx<R>,
+        mut tx: ws::SocketTx<W>,
+    ) -> Result<(), W::Error> {
+                    info!{"WsRq"};
+        let mut buffer = [0; 1024];
+
+        let close_reason = loop {
+            match rx.next_message(&mut buffer).await {
+                Ok(ws::Message::Text(data)) => tx.send_text(data).await,
+                Ok(ws::Message::Binary(data)) => tx.send_binary(data).await,
+                Ok(ws::Message::Close(reason)) => {
+                    info!("Websocket close reason: {}", reason);
+                    break None;
+                }
+                Ok(ws::Message::Ping(data)) => tx.send_pong(data).await,
+                Ok(ws::Message::Pong(_)) => continue,
+                Err(err) => {
+                    error!("Websocket Error");
+
+                    let code = match err {
+                        ws::ReadMessageError::Io(err) => return Err(err),
+                        ws::ReadMessageError::ReadFrameError(_)
+                        | ws::ReadMessageError::MessageStartsWithContinuation
+                        | ws::ReadMessageError::UnexpectedMessageStart => 1002,
+                        ws::ReadMessageError::ReservedOpcode(_) => 1003,
+                        ws::ReadMessageError::TextIsNotUtf8 => 1007,
+                    };
+
+                    break Some((code, "Websocket Error"));
+                }
+            }?;
+        };
+
+        tx.close(close_reason).await
+    }
+}
 
 #[esp_rtos::main(entry = "core0")]
 async fn main(spawner: Spawner) {
@@ -222,13 +302,13 @@ async fn main(spawner: Spawner) {
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_device,
         ap_config,
-        mk_static!(StackResources<3>, StackResources::<3>::new()),
+        mk_static!(StackResources<8>, StackResources::<8>::new()),
         seed,
     );
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_device,
         sta_config,
-        mk_static!(StackResources<4>, StackResources::<4>::new()),
+        mk_static!(StackResources<8>, StackResources::<8>::new()),
         seed,
     );
 
@@ -268,6 +348,25 @@ async fn main(spawner: Spawner) {
 
 
     spawner.spawn(run_webserver(ap_stack, sta_stack)).unwrap();
+
+    let app = mk_static!(AppRouter<AppProps>, AppProps.build_app());
+
+    let config = mk_static!(
+        picoserve::Config::<Duration>,
+        picoserve::Config::new(picoserve::Timeouts {
+            start_read_request: Some(Duration::from_secs(5)),persistent_start_read_request: Some(Duration::from_secs(1)),
+            read_request: Some(Duration::from_secs(1)),
+            write: Some(Duration::from_secs(1)),
+        })
+        .keep_connection_alive()
+    );
+
+    //spawner.spawn(web_task(1, ap_stack, app, config)).unwrap();
+    for id in 0..WEB_TASK_POOL_SIZE{
+    spawner.spawn(web_task(id, sta_stack, app, config)).unwrap();
+    }
+
+
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
         software_interrupt.software_interrupt0,
@@ -464,7 +563,8 @@ async fn main(spawner: Spawner) {
     for (i, p) in calibration.iter_mut().enumerate() {
         *p = (mins[i], maxs[i]);
     }
-    info!("Calibration: {:?}", calibration);
+    // To telemetry
+    //info!("Calibration: {:?}", calibration);
     let mut position = 0;
 
     loop {
@@ -578,6 +678,8 @@ async fn main(spawner: Spawner) {
             right_motor_backward.set_duty(0).expect("Failed to set PWM");
         }
 
+        /*
+        // THis should now move to telemetry
         // Debug info
         for (i, v) in sensor_rcv.get().await.iter().enumerate() {
             info!("Read value S{}: {}", i, v);
@@ -587,7 +689,7 @@ async fn main(spawner: Spawner) {
         info!("Pin status: {}", emiter.is_set_high());
         info!("Time passed: {}us", total_time.as_micros());
         info!("{:?}", control_rcv.get().await.set_led);
-        info!("==============");
+        info!("==============");*/
 
         // Apply settings
 
@@ -612,7 +714,8 @@ fn normalize(
         .zip(values)
         .enumerate()
         .for_each(|(i, ((min, max), v))| {
-            info!("{},{}", v, min);
+            //Telemetry
+            //info!("{},{}", v, min);
             data[i] = if min == max {
                 1000
             } else if v <= min {
@@ -692,16 +795,23 @@ async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
 
     let meta = fs.open_file_with_options_and_then(
         |o| o.read(true).write(true).create(true),
-        path!("last.txt"),
+        path!("config.txt"),
         |file| {
-            let mut ver = [0; 1];
+            let mut cfg = LFConfig{
+                telemetry_version: 0
+            };
+            let mut buf = [0;128];
+
             if file.is_empty().is_ok_and(|v| !v) {
-                file.read(&mut ver)?;
+                let cnt = file.read(&mut buf)?;
+                cfg = serde_json::from_slice(&buf[..cnt]).unwrap();
             }
-            info!("{}", ver);
+            info!("{}", cfg.telemetry_version);
+            cfg.telemetry_version += 1;
             file.seek(SeekFrom::Start(0))?;
-            file.write(&[ver[0] + 1])?;
-            telemetry_file = format!("telemetry_{}.csv\0", ver[0]);
+            let serialized = serde_json::to_vec(&cfg).unwrap();
+            file.write(&serialized)?;
+            telemetry_file = format!("telemetry_{}.csv\0", cfg.telemetry_version);
             Ok(())
         },
     );
@@ -726,6 +836,7 @@ async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
             error!("{}", e.code());
         }
     }
+
 }
 
 #[embassy_executor::task]
@@ -935,4 +1046,31 @@ async fn run_webserver(
         server_socket.abort();
     }
 
+}
+
+const WEB_TASK_POOL_SIZE: usize = 3;
+
+#[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
+async fn web_task(
+    id: usize,
+    stack: embassy_net::Stack<'static>,
+    app: &'static AppRouter<AppProps>,
+    config: &'static picoserve::Config<Duration>,
+) -> ! {
+    let port = 80;
+    let mut tcp_rx_buffer = [0; 1024];
+    let mut tcp_tx_buffer = [0; 1024];
+    let mut http_buffer = [0; 2048];
+
+    picoserve::listen_and_serve(
+        id,
+        app,
+        config,
+        stack,
+        port,
+        &mut tcp_rx_buffer,
+        &mut tcp_tx_buffer,
+        &mut http_buffer,
+    )
+    .await
 }
