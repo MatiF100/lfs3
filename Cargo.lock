@@ -802,8 +802,8 @@ dependencies = [
 
 [[package]]
 name = "esp-hal-smartled"
-version = "0.16.0"
-source = "git+https://github.com/badamson/esp-hal-community.git?branch=updates-for-esp-hal-1.0.0-rc.1#5df693ca55848fa7a4cdae5563e3877e5d0a562e"
+version = "0.17.0"
+source = "git+https://github.com/esp-rs/esp-hal-community.git?branch=main#ab4316534d90e3a12785907f043f6899faee0f20"
 dependencies = [
  "document-features",
  "esp-hal",
@@ -1360,6 +1360,7 @@ dependencies = [
  "esp-rtos",
  "esp-storage",
  "littlefs2",
+ "oneshot",
  "picoserve",
  "serde",
  "serde-csv-core",
@@ -1529,6 +1530,12 @@ checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "oneshot"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ce411919553d3f9fa53a0880544cda985a112117a0444d5ff1e870a893d6ea"
 
 [[package]]
 name = "paste"

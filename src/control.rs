@@ -5,10 +5,40 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Sender};
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::analog::adc::{Adc, AdcPin};
-use esp_hal::gpio::{Output};
+use esp_hal::gpio::Output;
 use esp_hal::ledc::LowSpeed;
 use esp_hal::ledc::channel::{self, ChannelIFace};
 use esp_hal::{Blocking, peripherals};
+use esp_hal_smartled::SmartLedsAdapter;
+use smart_leds::hsv::{Hsv, hsv2rgb};
+use smart_leds::{ RGB8, SmartLedsWrite, brightness, gamma};
+
+struct Actions {
+    calibrate: bool,
+    set_kp: Option<f32>,
+    set_ki: Option<f32>,
+    set_kd: Option<f32>,
+
+    set_speed_base: Option<u8>,
+    set_speed_max: Option<u8>,
+    set_speed_turn: Option<u8>,
+
+    _set_lost_th: Option<u16>,
+}
+impl Default for Actions {
+    fn default() -> Self {
+        Self {
+            calibrate: true,
+            set_kp: None,
+            set_ki: None,
+            set_kd: None,
+            set_speed_base: None,
+            set_speed_max: None,
+            set_speed_turn: None,
+            _set_lost_th: None,
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_control_loop(
@@ -24,11 +54,12 @@ pub async fn run_control_loop(
 
     mut emiter: Output<'static>,
 
-     left_motor_forward: channel::Channel<'static, LowSpeed>,
-     left_motor_backward: channel::Channel<'static, LowSpeed>,
-     right_motor_forward: channel::Channel<'static, LowSpeed>,
-     right_motor_backward: channel::Channel<'static, LowSpeed>,
+    left_motor_forward: channel::Channel<'static, LowSpeed>,
+    left_motor_backward: channel::Channel<'static, LowSpeed>,
+    right_motor_forward: channel::Channel<'static, LowSpeed>,
+    right_motor_backward: channel::Channel<'static, LowSpeed>,
 
+    mut led: SmartLedsAdapter<'static, 25>,
     mut control_rcv: Receiver<'static, CriticalSectionRawMutex, Control, 2>,
     sensor_comm: Sender<'static, CriticalSectionRawMutex, [u16; SENSOR_COUNT], 2>,
 ) {
@@ -36,70 +67,113 @@ pub async fn run_control_loop(
     let mut mins = [0; SENSOR_COUNT];
     let mut maxs = [4096; SENSOR_COUNT];
 
-    let kp = PID_KP;
-    let ki = PID_KI;
-    let kd = PID_KD;
+    let mut kp = PID_KP;
+    let mut _ki = PID_KI;
+    let mut kd = PID_KD;
     let mut last_error = 0.;
-    let base_speed = BASE_SPEED;
-    let max_speed = MAX_SPEED;
-    let turn_speed = TURN_SPEED;
+    let mut base_speed = BASE_SPEED;
+    let mut max_speed = MAX_SPEED;
+    let mut turn_speed = TURN_SPEED;
 
     let mut last_seen = 0;
-    let mut lost = false;
-    let mut lost_sen = 0;
+    let mut _lost = false;
+    let mut _lost_sen = 0;
     let mut last_detection_time = Instant::now();
     let line_th = LINE_THRESHOLD;
 
-    info!("Starting calibration");
-    for j in 0..CALIBRATION_STEPS {
-        emiter.set_low();
-        Timer::after(Duration::from_millis(CALIBRATION_DELAY_MS)).await;
-        let pin_val1 = adc.read_blocking(&mut sensor1);
-        let pin_val2 = adc.read_blocking(&mut sensor2);
-        let pin_val3 = adc.read_blocking(&mut sensor3);
-        let pin_val4 = adc.read_blocking(&mut sensor4);
-        let pin_val5 = adc.read_blocking(&mut sensor5);
-        let pin_val6 = adc.read_blocking(&mut sensor6);
-        let pin_val7 = adc.read_blocking(&mut sensor7);
-        let pin_val8 = adc.read_blocking(&mut sensor8);
-        let pin_val = [
-            pin_val1, pin_val2, pin_val3, pin_val4, pin_val5, pin_val6, pin_val7, pin_val8,
-        ];
-
-        for (i, p) in pin_val.iter().enumerate() {
-            if j == 0 || *p > maxs[i] {
-                maxs[i] = *p;
-            }
-        }
-
-        emiter.set_high();
-        Timer::after(Duration::from_millis(CALIBRATION_DELAY_MS)).await;
-        let pin_val1 = adc.read_blocking(&mut sensor1);
-        let pin_val2 = adc.read_blocking(&mut sensor2);
-        let pin_val3 = adc.read_blocking(&mut sensor3);
-        let pin_val4 = adc.read_blocking(&mut sensor4);
-        let pin_val5 = adc.read_blocking(&mut sensor5);
-        let pin_val6 = adc.read_blocking(&mut sensor6);
-        let pin_val7 = adc.read_blocking(&mut sensor7);
-        let pin_val8 = adc.read_blocking(&mut sensor8);
-        let pin_val = [
-            pin_val1, pin_val2, pin_val3, pin_val4, pin_val5, pin_val6, pin_val7, pin_val8,
-        ];
-
-        for (i, p) in pin_val.iter().enumerate() {
-            if j == 0 || *p < mins[i] {
-                mins[i] = *p;
-            }
-        }
-    }
-    for (i, p) in calibration.iter_mut().enumerate() {
-        *p = (mins[i], maxs[i]);
-    }
-    info!("Calibrated: {:?}", calibration);
-
+    let mut color = Hsv {
+        hue: 0,
+        sat: 255,
+        val: 255,
+    };
+    let mut data: RGB8;
     let mut position = 0;
 
+    let mut actions = Actions::default();
+
     loop {
+        // Give main loop 500 seconds to run
+        let loop_expiry = Instant::now().saturating_add(Duration::from_millis(MAIN_LOOP_DELAY_MS));
+
+        if actions.calibrate {
+            info!("Starting calibration");
+            for j in 0..CALIBRATION_STEPS {
+                emiter.set_low();
+                Timer::after(Duration::from_millis(CALIBRATION_DELAY_MS)).await;
+                let pin_val1 = adc.read_blocking(&mut sensor1);
+                let pin_val2 = adc.read_blocking(&mut sensor2);
+                let pin_val3 = adc.read_blocking(&mut sensor3);
+                let pin_val4 = adc.read_blocking(&mut sensor4);
+                let pin_val5 = adc.read_blocking(&mut sensor5);
+                let pin_val6 = adc.read_blocking(&mut sensor6);
+                let pin_val7 = adc.read_blocking(&mut sensor7);
+                let pin_val8 = adc.read_blocking(&mut sensor8);
+                let pin_val = [
+                    pin_val1, pin_val2, pin_val3, pin_val4, pin_val5, pin_val6, pin_val7, pin_val8,
+                ];
+
+                for (i, p) in pin_val.iter().enumerate() {
+                    if j == 0 || *p > maxs[i] {
+                        maxs[i] = *p;
+                    }
+                }
+
+                emiter.set_high();
+                Timer::after(Duration::from_millis(CALIBRATION_DELAY_MS)).await;
+                let pin_val1 = adc.read_blocking(&mut sensor1);
+                let pin_val2 = adc.read_blocking(&mut sensor2);
+                let pin_val3 = adc.read_blocking(&mut sensor3);
+                let pin_val4 = adc.read_blocking(&mut sensor4);
+                let pin_val5 = adc.read_blocking(&mut sensor5);
+                let pin_val6 = adc.read_blocking(&mut sensor6);
+                let pin_val7 = adc.read_blocking(&mut sensor7);
+                let pin_val8 = adc.read_blocking(&mut sensor8);
+                let pin_val = [
+                    pin_val1, pin_val2, pin_val3, pin_val4, pin_val5, pin_val6, pin_val7, pin_val8,
+                ];
+
+                for (i, p) in pin_val.iter().enumerate() {
+                    if j == 0 || *p < mins[i] {
+                        mins[i] = *p;
+                    }
+                }
+            }
+            for (i, p) in calibration.iter_mut().enumerate() {
+                *p = (mins[i], maxs[i]);
+            }
+            info!("Calibrated: {:?}", calibration);
+            actions.calibrate = false;
+        }
+
+        if let Some(v) = actions.set_kp {
+            kp = v;
+            actions.set_kp = None;
+        }
+        if let Some(v) = actions.set_kd {
+            kd = v;
+            actions.set_kd = None;
+        }
+        if let Some(v) = actions.set_ki {
+            _ki = v;
+            actions.set_ki = None;
+        }
+        if let Some(v) = actions.set_speed_base {
+            base_speed = v;
+            actions.set_speed_base = None;
+        }
+        if let Some(v) = actions.set_speed_max {
+            max_speed = v as i32;
+            actions.set_speed_max = None;
+        }
+        if let Some(v) = actions.set_speed_turn {
+            turn_speed = v;
+            actions.set_speed_turn = None;
+        }
+
+        color.hue = color.hue.wrapping_add(1);
+        data = hsv2rgb(color);
+        led.write(brightness(gamma([data].into_iter()), LED_LEVEL))
+            .unwrap();
         let control = control_rcv.try_changed();
         if let Some(control) = control {
             if control.set_led {
@@ -124,7 +198,7 @@ pub async fn run_control_loop(
         emiter.set_low();
         let _total_time = Instant::now().checked_duration_since(s_time).unwrap();
 
-        let normalized = normalize(&calibration, &pin_val);
+        let normalized = normalize(&calibration, pin_val);
         position = get_position(&normalized, position);
 
         sensor_comm.send(normalized);
@@ -158,26 +232,26 @@ pub async fn run_control_loop(
         let c_time = Instant::now();
         let delta_time = c_time.checked_duration_since(last_detection_time).unwrap();
 
-        if pin_val[0] > line_th && *pin_val.last().unwrap() < line_th {
+        if normalized[0] > line_th && *normalized.last().unwrap() < line_th {
             if last_seen != 1 && delta_time.as_millis() >= 100 {
                 last_seen = 1; // Widziano linię po lewej
                 last_detection_time = c_time;
             }
         }
-        if pin_val[0] < line_th && *pin_val.last().unwrap() > line_th {
+        if normalized[0] < line_th && *normalized.last().unwrap() > line_th {
             if last_seen != 2 && delta_time.as_millis() >= 100 {
                 last_seen = 2; // Widziano linię po prawej
                 last_detection_time = c_time;
             }
         }
 
-        if pin_val.iter().all(|pin| *pin < line_th) {
-            lost = true;
+        if normalized.iter().all(|pin| *pin < line_th) {
+            _lost = true;
         } else {
-            lost = false;
+            _lost = false;
         }
 
-        if lost && last_seen == 1 {
+        if _lost && last_seen == 1 {
             left_motor_forward.set_duty(0).expect("Failed to set PWM");
             left_motor_backward
                 .set_duty(turn_speed)
@@ -186,7 +260,7 @@ pub async fn run_control_loop(
                 .set_duty(turn_speed)
                 .expect("Failed to set PWM");
             right_motor_backward.set_duty(0).expect("Failed to set PWM");
-        } else if lost && last_seen == 2 {
+        } else if _lost && last_seen == 2 {
             left_motor_forward
                 .set_duty(turn_speed)
                 .expect("Failed to set PWM");
@@ -207,13 +281,14 @@ pub async fn run_control_loop(
         }
 
         emiter.set_high();
-        Timer::after(Duration::from_millis(MAIN_LOOP_DELAY_MS)).await;
+        //Timer::after(Duration::from_millis(MAIN_LOOP_DELAY_MS)).await;
+        Timer::at(loop_expiry).await;
     }
 }
 
 fn normalize(
     calibration: &[(u16, u16); SENSOR_COUNT],
-    values: &[u16; SENSOR_COUNT],
+    values: [u16; SENSOR_COUNT],
 ) -> [u16; SENSOR_COUNT] {
     let mut data = [0; SENSOR_COUNT];
     calibration
@@ -223,12 +298,12 @@ fn normalize(
         .for_each(|(i, ((min, max), v))| {
             data[i] = if min == max {
                 1000
-            } else if v <= min {
+            } else if v <= *min {
                 0
-            } else if v >= max {
+            } else if v >= *max {
                 1000
             } else {
-                (*v as u32 - *min as u32) * 1000 / (*max as u32 - *min as u32)
+                (v as u32 - *min as u32) * 1000 / (*max as u32 - *min as u32)
             } as u16;
         });
     data

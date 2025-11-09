@@ -31,6 +31,7 @@ pub mod network;
 pub mod state;
 pub mod storage;
 
+use crate::config::SENSOR_COUNT;
 use crate::http_server::AppProps;
 
 #[macro_export]
@@ -49,7 +50,7 @@ pub async fn run(spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 128 * 1024);
 
     let timer0 = SystemTimer::new(peripherals.SYSTIMER);
     esp_rtos::start(timer0.alarm0);
@@ -72,66 +73,6 @@ pub async fn run(spawner: Spawner) {
     };
     led.write(brightness([RED].into_iter(), config::LED_LEVEL))
         .unwrap();
-
-    let (ap_stack, sta_stack) = network::init_network(spawner, peripherals.WIFI).await;
-
-    let app = mk_static!(
-        picoserve::AppRouter<AppProps>,
-        http_server::AppProps.build_app()
-    );
-    let pico_config = mk_static!(
-        picoserve::Config<Duration>,
-        picoserve::Config::new(picoserve::Timeouts {
-            start_read_request: Some(Duration::from_secs(5)),
-            persistent_start_read_request: Some(Duration::from_secs(1)),
-            read_request: Some(Duration::from_secs(1)),
-            write: Some(Duration::from_secs(1)),
-        })
-        .keep_connection_alive()
-    );
-
-    for id in 0..config::WEB_TASK_POOL_SIZE {
-        spawner
-            .spawn(http_server::web_task(id, sta_stack, app, pico_config))
-            .unwrap();
-    }
-
-    spawner
-        .spawn(network::run_webserver(ap_stack, sta_stack))
-        .unwrap();
-
-    esp_rtos::start_second_core(
-        peripherals.CPU_CTRL,
-        software_interrupt.software_interrupt0,
-        software_interrupt.software_interrupt1,
-        unsafe { &mut OTHER_STACK },
-        move || {
-            info!("Info from 2nd core!");
-            // loop {}
-        },
-    );
-
-    let sensor_comm = state::SENSOR_WATCH.sender();
-    let control_rcv = state::CONTROL_WATCH.receiver().unwrap();
-    let tele_sender = state::TELEMETRY_CHANNEL.sender();
-
-    spawner.spawn(control::read_sensors()).unwrap();
-    spawner
-        .spawn(storage::telemetry(peripherals.FLASH, session))
-        .unwrap();
-
-    tele_sender
-        .send(state::TelemetryPacket {
-            timestamp: 1,
-            temperature: 0.0,
-        })
-        .await;
-    tele_sender
-        .send(state::TelemetryPacket {
-            timestamp: 2,
-            temperature: 1.0,
-        })
-        .await;
 
     let mut pwm = Ledc::new(peripherals.LEDC);
     pwm.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -182,6 +123,70 @@ pub async fn run(spawner: Spawner) {
         })
         .expect("Failed to init PWM");
 
+    let (ap_stack, sta_stack) = network::init_network(spawner, peripherals.WIFI).await;
+
+    let app = mk_static!(
+        picoserve::AppRouter<AppProps>,
+        http_server::AppProps.build_app()
+    );
+    let pico_config = mk_static!(
+        picoserve::Config<Duration>,
+        picoserve::Config::new(picoserve::Timeouts {
+            start_read_request: Some(Duration::from_secs(5)),
+            persistent_start_read_request: Some(Duration::from_secs(1)),
+            read_request: Some(Duration::from_secs(1)),
+            write: Some(Duration::from_secs(1)),
+        })
+        .keep_connection_alive()
+    );
+
+    for id in 0..config::WEB_TASK_POOL_SIZE {
+        spawner
+            .spawn(http_server::web_task(id, sta_stack, app, pico_config))
+            .unwrap();
+    }
+
+    for id in 0..config::WEB_TASK_POOL_SIZE {
+        spawner
+            .spawn(http_server::web_task(id, ap_stack, app, pico_config))
+            .unwrap();
+    }
+
+    spawner
+        .spawn(network::run_webserver(ap_stack, sta_stack))
+        .unwrap();
+
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        software_interrupt.software_interrupt0,
+        software_interrupt.software_interrupt1,
+        unsafe { &mut OTHER_STACK },
+        move || {
+            info!("Info from 2nd core!");
+            // loop {}
+        },
+    );
+
+    let sensor_comm = state::SENSOR_WATCH.sender();
+    let control_rcv = state::CONTROL_WATCH.receiver().unwrap();
+    let tele_sender = state::TELEMETRY_CHANNEL.sender();
+
+    spawner.spawn(control::read_sensors()).unwrap();
+    spawner
+        .spawn(storage::telemetry(peripherals.FLASH, session))
+        .unwrap();
+
+    tele_sender
+        .send(state::TelemetryPacket {
+            sensor_values: [0; SENSOR_COUNT],
+        })
+        .await;
+    tele_sender
+        .send(state::TelemetryPacket {
+            sensor_values: [255; SENSOR_COUNT],
+        })
+        .await;
+
     let emiter = Output::new(peripherals.GPIO16, Level::High, OutputConfig::default());
 
     let mut adc_config = AdcConfig::new();
@@ -212,6 +217,7 @@ pub async fn run(spawner: Spawner) {
         left_motor_backward,
         right_motor_forward,
         right_motor_backward,
+        led,
         control_rcv,
         sensor_comm,
     )

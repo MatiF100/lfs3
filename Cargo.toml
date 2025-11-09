@@ -21,7 +21,7 @@ esp-hal = { version = "1.0.0-rc.1", features = [
 embassy-sync = "0.7.2"
 
 smart-leds = "0.4.0"
-esp-hal-smartled = {git = "https://github.com/badamson/esp-hal-community.git", branch = "updates-for-esp-hal-1.0.0-rc.1"} # Adapter RMT dla smart_leds
+esp-hal-smartled = {git = "https://github.com/esp-rs/esp-hal-community.git", branch = "main"} # Adapter RMT dla smart_leds
 
 esp-storage = {version = "0.8.0", features = ["defmt", "esp32s3"]}
 littlefs2 = {version = "0.6.1", features = ["c-stubs", "alloc", "log-all", "serde"]}
@@ -76,6 +76,7 @@ embassy-futures = {version = "0.1.2", features = ["defmt"]}
 
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 picoserve = {version = "0.16.0", features = ["alloc", "defmt", "embassy"]}
+oneshot = {version = "0.1.11", default-features = false, features = ["async"]}
 
 
 [profile.dev]

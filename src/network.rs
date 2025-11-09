@@ -43,13 +43,13 @@ pub async fn init_network(
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_device,
         ap_config,
-        crate::mk_static!(StackResources<8>, StackResources::<8>::new()),
+        crate::mk_static!(StackResources<16>, StackResources::<16>::new()),
         NET_SEED,
     );
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_device,
         sta_config,
-        crate::mk_static!(StackResources<8>, StackResources::<8>::new()),
+        crate::mk_static!(StackResources<16>, StackResources::<16>::new()),
         NET_SEED,
     );
 

@@ -40,9 +40,11 @@ pub const SENSOR_COUNT: usize = 8;
 pub const MAX_POSITION: u16 = SENSOR_COUNT as u16 * 1000;
 pub const SENSOR_ADC_ATTENUATION: adc::Attenuation = adc::Attenuation::_11dB;
 pub const CALIBRATION_STEPS: usize = 10;
-pub const CALIBRATION_DELAY_MS: u64 = 50;
 
-pub const LINE_THRESHOLD: u16 = 3000;
+// Longer delay allows sensor LED to settle state before taking reads
+pub const CALIBRATION_DELAY_MS: u64 = 1;
+
+pub const LINE_THRESHOLD: u16 = 800;
 pub const SENSOR_WEIGHT_THRESHOLD: u16 = 50;
 pub const SENSOR_LINE_SEEN_THRESHOLD: u16 = 200;
 
@@ -50,9 +52,9 @@ pub const PID_KP: f32 = 0.005;
 pub const PID_KI: f32 = 0.0;
 pub const PID_KD: f32 = 0.025;
 
-pub const BASE_SPEED: u8 = 50;
-pub const MAX_SPEED: i32 = 80;
-pub const TURN_SPEED: u8 = 70;
+pub const BASE_SPEED: u8 = 10;
+pub const MAX_SPEED: i32 = 30;
+pub const TURN_SPEED: u8 = 40;
 
 // ##################################################
 // #      STORAGE CONFIG

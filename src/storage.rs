@@ -1,11 +1,13 @@
 // src/storage.rs
 
 use crate::config::BASE_OFFSET;
-use crate::state::{LFConfig, TELEMETRY_CHANNEL};
+use crate::state::{FS_CHANNEL, LFConfig, TELEMETRY_CHANNEL};
 use alloc::format;
 use alloc::string::ToString;
-use defmt::{error, info};
+use alloc::vec::Vec;
+use defmt::{error, info, println};
 use embassy_executor::task;
+use embassy_futures::select::{Either, select};
 use embedded_storage::ReadStorage;
 use embedded_storage::nor_flash::NorFlash;
 use esp_hal::peripherals;
@@ -126,23 +128,71 @@ pub async fn telemetry(flash: peripherals::FLASH<'static>, _session: [u8; 16]) {
     );
 
     loop {
-        let telemetry = rcv.receive().await;
-        let mut wrt = serde_csv_core::Writer::new();
-        let mut buf = [0; 128];
+        let event = select(rcv.receive(), FS_CHANNEL.receive()).await;
+        match event {
+            Either::First(telemetry) => {
+                let mut wrt = serde_csv_core::Writer::new();
+                let mut buf = [0; 128];
 
-        wrt.serialize(&telemetry, &mut buf).unwrap();
+                wrt.serialize(&telemetry, &mut buf).unwrap();
 
-        let e = fs.open_file_with_options_and_then(
-            |o| o.read(true).write(true).append(true).create(true),
-            Path::from_str_with_nul(&telemetry_file).unwrap(),
-            |file| {
-                file.write(&buf)?;
-                Ok(())
+                let e = fs.open_file_with_options_and_then(
+                    |o| o.read(true).write(true).append(true).create(true),
+                    Path::from_str_with_nul(&telemetry_file).unwrap(),
+                    |file| {
+                        file.write(&buf)?;
+                        Ok(())
+                    },
+                );
+
+                if let Err(e) = e {
+                    error!("Failed to write telemetry: {}", e.code());
+                }
+            }
+
+            Either::Second(fs_request) => match fs_request {
+                crate::state::FilesystemRequest::GetFile(path, sender) => {
+                    let e = fs.open_file_with_options_and_then(
+                        |o| o.read(true),
+                        Path::from_str_with_nul(&path).unwrap(),
+                        |file| {
+                            let mut result: Vec<u8> = Vec::with_capacity(file.len()?);
+                            let mut buf = [0; 100];
+
+                            while let Ok(b) = file.read(&mut buf) {
+                                if b == 0 {
+                                    break;
+                                }
+                                result.extend_from_slice(&buf[..b]);
+                            }
+
+                            sender.send(result).unwrap();
+                            Ok(())
+                        },
+                    );
+
+                    if let Err(e) = e {
+                        println!("{=str}", format!("{:?}", e));
+                        error!("Failed to read file: {}", e.code());
+                    }
+                }
+                crate::state::FilesystemRequest::WriteFile(path, items) => {
+                    let e = fs.open_file_with_options_and_then(
+                        |o| o.write(true).create(true).truncate(true),
+                        Path::from_str_with_nul(&path).unwrap(),
+                        |file| {
+                            let written = file.write(&items)?;
+                            info!("{} bytes written of {}", written, items.len());
+                            file.sync()?;
+                            Ok(())
+                        },
+                    );
+
+                    if let Err(e) = e {
+                        error!("Failed to write telemetry: {}", e.code());
+                    }
+                }
             },
-        );
-
-        if let Err(e) = e {
-            error!("Failed to write telemetry: {}", e.code());
         }
     }
 }
