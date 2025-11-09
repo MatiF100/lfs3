@@ -12,7 +12,7 @@ let websocketUri = (window.location.protocol === "https:") ? "wss:" : "ws:";
 websocketUri += "//" + window.location.host;
 websocketUri += currentPath.slice(0, currentPath.lastIndexOf("/") + 1) + "ws";
 
-let ws = new WebSocket(websocketUri, ["echo", "ignored_protocol"]);
+let ws = new WebSocket(websocketUri, ["lf-comm", "ignored_protocol"]);
 
 ws.addEventListener("close", function (ev) {
     ws.close();
@@ -28,7 +28,7 @@ ws.addEventListener("error", function (ev) {
 ws.addEventListener("message", function (ev) {
     let message = document.createElement("li");
     message.innerText = ev.data;
-    output.appendChild(message);
+    output.prepend(message);
 });
 
 button.addEventListener("click", function () {

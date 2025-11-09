@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel Sterowania Robota</title>
+    
+    <!-- STYL CSS WBUDOWANY W PLIK (zamiast Tailwind CDN) -->
+    <style>
+        /* Podstawowy reset i motyw */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #1a202c; /* bg-gray-900 */
+            color: #f7fafc; /* bg-gray-100 */
+            padding: 16px; /* p-4 */
+        }
+
+        /* Główny kontener */
+        .container {
+            max-width: 896px; /* max-w-4xl */
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        /* Nagłówek */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px; /* mb-6 */
+        }
+        header h1 {
+            font-size: 1.875rem; /* text-3xl */
+            font-weight: 700;
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #status-text {
+            color: #a0aec0; /* text-gray-400 */
+        }
+        #status-indicator {
+            width: 16px;
+            height: 16px;
+            border-radius: 9999px;
+            background-color: #e53e3e; /* bg-red-500 */
+            transition: background-color 0.3s ease;
+        }
+        #status-indicator.connected {
+            background-color: #38a169; /* bg-green-500 */
+        }
+
+        /* Główna siatka layoutu */
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 24px; /* gap-6 */
+        }
+
+        /* Karty (Sekcje) */
+        .card {
+            background-color: #2d3748; /* bg-gray-800 */
+            padding: 24px; /* p-6 */
+            border-radius: 8px; /* rounded-lg */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); /* shadow-lg */
+        }
+        .card-header {
+            font-size: 1.25rem; /* text-xl */
+            font-weight: 600; /* font-semibold */
+            margin-bottom: 16px; /* mb-4 */
+            padding-bottom: 8px; /* pb-2 */
+            border-bottom: 1px solid #4a5568; /* border-gray-700 */
+        }
+
+        /* Siatka przycisków */
+        .btn-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px; /* gap-4 */
+            margin-bottom: 16px; /* mb-4 */
+        }
+
+        /* Przyciski */
+        .btn {
+            font-weight: 700;
+            padding: 8px 16px; /* py-2 px-4 */
+            border-radius: 8px; /* rounded-lg */
+            border: none;
+            cursor: pointer;
+            color: white;
+            transition: background-color 0.2s ease;
+        }
+        .btn-blue { background-color: #3182ce; /* bg-blue-600 */ }
+        .btn-blue:hover { background-color: #2b6cb0; /* hover:bg-blue-700 */ }
+        .btn-gray { background-color: #718096; /* bg-gray-600 */ }
+        .btn-gray:hover { background-color: #4a5568; /* hover:bg-gray-700 */ }
+        .btn-green { background-color: #38a169; /* bg-green-600 */ }
+        .btn-green:hover { background-color: #2f855a; /* hover:bg-green-700 */ }
+        .btn-full { width: 100%; }
+
+        /* Formularz PID */
+        .pid-form {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 12px 8px;
+            align-items: center;
+        }
+        .pid-form label {
+            font-family: monospace;
+            color: #cbd5e0; /* text-gray-300 */
+        }
+        input[type="number"] {
+            background-color: #4a5568; /* bg-gray-700 */
+            color: white;
+            border: 1px solid #718096; /* border-gray-600 */
+            border-radius: 8px; /* rounded-lg */
+            padding: 8px; /* p-2 */
+            width: 100%;
+        }
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #4299e1; /* focus:border-blue-500 */
+            box-shadow: 0 0 0 2px #4299e1;
+        }
+        .pid-form .btn {
+            grid-column: 1 / -1; /* Rozciągnij na obie kolumny */
+            margin-top: 8px;
+        }
+        
+        /* Okna logów */
+        .log-window {
+            background-color: #1a202c; /* bg-gray-900 */
+            border-radius: 8px; /* rounded-lg */
+            padding: 12px; /* p-3 */
+            font-family: monospace;
+            font-size: 0.875rem; /* text-sm */
+            overflow-y: scroll;
+        }
+        #telemetry-log { height: 384px; /* h-96 */ }
+        #console-log { height: 192px; /* h-48 */ }
+
+        /* Style dla wpisów w logach (ustawiane przez JS) */
+        .log-entry { margin-bottom: 4px; }
+        .log-info { color: #a0aec0; } /* text-gray-400 */
+        .log-error { color: #f87171; } /* text-red-400 */
+        .log-success { color: #48bb78; } /* text-green-400 */
+        .log-cmd { color: #90cdf4; } /* text-blue-300 */
+        .log-telemetry { color: #68d391; } /* text-green-300 */
+        .log-placeholder { color: #718096; } /* text-gray-500 */
+
+        /* Paski przewijania (dla estetyki) */
+        .log-window::-webkit-scrollbar { width: 8px; }
+        .log-window::-webkit-scrollbar-track { background: #2d3748; }
+        .log-window::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 4px; }
+        .log-window::-webkit-scrollbar-thumb:hover { background: #718096; }
+
+        /* Responsywność (Desktop) */
+        @media (min-width: 768px) { /* md: */
+            .grid-layout {
+                grid-template-columns: 1fr 1fr;
+            }
+            .col-span-2 {
+                grid-column: span 2 / span 2;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+
+        <!-- NAGŁÓWEK -->
+        <header>
+            <h1>Panel Sterowania Robota</h1>
+            <div class="status">
+                <span id="status-text">Rozłączono</span>
+                <div id="status-indicator"></div>
+            </div>
+        </header>
+
+        <!-- GŁÓWNA ZAWARTOŚĆ -->
+        <main class="grid-layout">
+
+            <!-- SEKCJA KONTROLEK -->
+            <section class="card">
+                <h2 class="card-header">Sterowanie</h2>
+                
+                <div class="btn-grid">
+                    <button id="btn-led-on" class="btn btn-blue">Włącz LED</button>
+                    <button id="btn-led-off" class="btn btn-gray">Wyłącz LED</button>
+                </div>
+
+                <h3 class="card-header" style="font-size: 1.125rem; border-bottom: none; padding-bottom: 0; margin-bottom: 12px;">Ustawienia PID</h3>
+                <div class="pid-form">
+                    <label for="in-kp">Kp:</label>
+                    <input type="number" id="in-kp" value="0.005" step="0.001">
+                    
+                    <label for="in-ki">Ki:</label>
+                    <input type="number" id="in-ki" value="0.0" step="0.001">
+                    
+                    <label for="in-kd">Kd:</label>
+                    <input type="number" id="in-kd" value="0.025" step="0.001">
+                
+                    <button id="btn-set-pid" class="btn btn-green btn-full">
+                        Zastosuj PID
+                    </button>
+                </div>
+            </section>
+
+            <!-- SEKCJA TELEMETRII (DANE Z ROBOTA) -->
+            <section class="card">
+                <h2 class="card-header">Telemetria (Dane z Robota)</h2>
+                <div id="telemetry-log" class="log-window">
+                    <div class="log-placeholder">Oczekiwanie na dane...</div>
+                </div>
+            </section>
+
+            <!-- SEKCJA KONSOLI (DEBUG) -->
+            <section class="card col-span-2">
+                <h2 class="card-header">Konsola Interfejsu</h2>
+                <div id="console-log" class="log-window">
+                    <!-- Logi interfejsu będą wstawiane tutaj -->
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- SKRYPT JAVASCRIPT -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+
+            // --- Referencje do elementów UI ---
+            const statusIndicator = document.getElementById('status-indicator');
+            const statusText = document.getElementById('status-text');
+            const consoleLog = document.getElementById('console-log');
+            const telemetryLog = document.getElementById('telemetry-log');
+
+            const btnLedOn = document.getElementById('btn-led-on');
+            const btnLedOff = document.getElementById('btn-led-off');
+            const btnSetPid = document.getElementById('btn-set-pid');
+
+            const inKp = document.getElementById('in-kp');
+            const inKi = document.getElementById('in-ki');
+            const inKd = document.getElementById('in-kd');
+
+            let ws = null; // Uchwyt WebSocket
+
+            /**
+             * Loguje wiadomość do konsoli interfejsu (na stronie).
+             * @param {string} message - Wiadomość do zalogowania.
+             * @param {'info' | 'error' | 'success' | 'cmd'} level - Typ wiadomości.
+             */
+            function logToConsole(message, level = 'info') {
+                const entry = document.createElement('div');
+                // Używamy klas zdefiniowanych w <style>
+                entry.className = `log-entry log-${level}`;
+                entry.textContent = `> ${message}`;
+                
+                consoleLog.prepend(entry);
+                if (consoleLog.children.length > 100) {
+                    consoleLog.removeChild(consoleLog.lastChild);
+                }
+            }
+
+            /**
+             * Aktualizuje okno telemetrii.
+             * @param {object} telemetryData - Obiekt z `ServerMessage::Telemetry`.
+             */
+            function updateTelemetry(telemetryData) {
+                // Znajdź i usuń placeholder, jeśli istnieje
+                const placeholder = telemetryLog.querySelector('.log-placeholder');
+                if (placeholder) {
+                    telemetryLog.removeChild(placeholder);
+                }
+
+                const data = telemetryData.sensor_values;
+                const entry = document.createElement('div');
+                entry.className = 'log-entry log-telemetry';
+                
+                const sensorString = data.map((val, i) => `S${i}: ${String(val).padStart(4, ' ')}`).join(' | ');
+                entry.textContent = sensorString;
+
+                telemetryLog.prepend(entry);
+                if (telemetryLog.children.length > 100) {
+                    telemetryLog.removeChild(telemetryLog.lastChild);
+                }
+            }
+
+            /**
+             * Wysyła komendę do serwera WebSocket.
+             * @param {object} commandObject - Obiekt JavaScript zgodny z `ClientCommand`.
+             */
+            function sendWsCommand(commandObject) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    try {
+                        const commandString = JSON.stringify(commandObject);
+                        ws.send(commandString);
+                        logToConsole(`WYSŁANO: ${commandString}`, 'cmd');
+                    } catch (e) {
+                        logToConsole(`Błąd serializacji JSON: ${e.message}`, 'error');
+                    }
+                } else {
+                    logToConsole('Nie można wysłać komendy. WebSocket jest zamknięty.', 'error');
+                }
+            }
+
+            /**
+             * Inicjuje i zarządza połączeniem WebSocket.
+             */
+            function connectWebSocket() {
+                const wsUrl = `ws://${window.location.host}/ws`;
+                logToConsole(`Łączenie z ${wsUrl}...`, 'info');
+
+                ws = new WebSocket(wsUrl, 'lf-comm');
+
+                ws.onopen = () => {
+                    logToConsole('Połączono z WebSocket!', 'success');
+                    // Zmieniamy styl wskaźnika
+                    statusIndicator.classList.add('connected');
+                    statusText.textContent = 'Połączono';
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        console.log(data);
+
+                        if (data.Telemetry) {
+                            updateTelemetry(data.Telemetry);
+                        } else if (data.Ack) {
+                            logToConsole('Serwer potwierdził komendę (Ack).', 'success');
+                        } else if (data.Error) {
+                            logToConsole(`BŁĄD SERWERA: ${data.Error.message}`, 'error');
+                        } else {
+                            logToConsole(`Odebrano nieznany format danych: ${event.data}`, 'info');
+                        }
+
+                    } catch (e) {
+                        logToConsole(`Błąd deserializacji JSON: ${e.message}`, 'error');
+                        logToConsole(`Oryginalna wiadomość: ${event.data}`, 'info');
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    logToConsole('Błąd WebSocket.', 'error');
+                    console.error('WebSocket Error:', error);
+                };
+
+                ws.onclose = (event) => {
+                    logToConsole(`Rozłączono (kod: ${event.code}). Próba ponownego połączenia za 2s...`, 'error');
+                    // Zmieniamy styl wskaźnika
+                    statusIndicator.classList.remove('connected');
+                    statusText.textContent = 'Rozłączono';
+                    
+                    setTimeout(connectWebSocket, 2000);
+                };
+            }
+
+            // --- Logika przypięcia zdarzeń do przycisków ---
+
+            btnLedOn.addEventListener('click', () => {
+                sendWsCommand({ "SetMotor": { "enabled": true } });
+            });
+
+            btnLedOff.addEventListener('click', () => {
+                sendWsCommand({ "SetMotor": { "enabled": false } });
+            });
+
+            btnSetPid.addEventListener('click', () => {
+                const kp = parseFloat(inKp.value) || 0;
+                const ki = parseFloat(inKi.value) || 0;
+                const kd = parseFloat(inKd.value) || 0;
+                
+                sendWsCommand({
+                    "SetPid": {
+                        "kp": kp,
+                        "ki": ki,
+                        "kd": kd
+                    }
+                });
+            });
+
+            // --- Inicjalizacja ---
+            connectWebSocket();
+        });
+    </script>
+</body>
+</html>
