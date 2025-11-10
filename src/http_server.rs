@@ -1,6 +1,7 @@
 // src/http_server.rs
 
 use crate::{
+    commands::handle_client_command,
     config::{
         PICOSERVE_HTTP_BUFFER, PICOSERVE_TCP_RX_BUFFER, PICOSERVE_TCP_TX_BUFFER, WEB_PORT,
         WEB_TASK_POOL_SIZE,
@@ -27,18 +28,11 @@ use picoserve::{
 use serde::{Deserialize, Serialize};
 use serde_json::from_slice;
 
-#[derive(Serialize, Deserialize, Debug)]
-enum ClientCommand {
-    SetLed { enabled: bool },
-    SetPid { kp: f32, ki: f32, kd: f32 },
-    ListFiles,
-}
-
 /// Wiadomości wysyłane przez serwer (robota) do klienta.
 #[derive(Serialize, Debug)]
 enum ServerMessage<'a> {
     /// Potwierdzenie wykonania komendy.
-    Ack,
+    Ack(bool),
     /// Wiadomość o błędzie (np. zła komenda, błąd implementacji).
     Error { message: &'a str },
     /// Strumień danych telemetrycznych.
@@ -175,7 +169,7 @@ impl ws::WebSocketCallback for WebsocketHandler {
         mut tx: ws::SocketTx<W>,
     ) -> Result<(), W::Error> {
         info! {"WebSocket connection opened"};
-        let mut rx_buffer = [0; 1024]; 
+        let mut rx_buffer = [0; 1024];
         let mut _tx_buffer = [0; 256];
 
         let mut sensor_receiver = SENSOR_WATCH.receiver().unwrap();
@@ -186,18 +180,20 @@ impl ws::WebSocketCallback for WebsocketHandler {
 
             match event {
                 Either::First(Ok(ws::Message::Text(data))) => {
-                    let response = match from_slice::<ClientCommand>(data.as_bytes()) {
-                        Ok(_cmd) => {
-                            //handle_client_command(cmd).await
-                            ServerMessage::Ack
-                        }
-                        Err(_) => {
-                            error!("Failed to deserialize ClientCommand");
-                            ServerMessage::Error {
-                                message: "Invalid command format",
+                    let response =
+                        match from_slice::<crate::commands::ClientCommand>(data.as_bytes()) {
+                            Ok(cmd) => {
+                                info!("Parsed command: {=str}", format!("{:?}", cmd));
+                                handle_client_command(cmd).await;
+                                ServerMessage::Ack(true)
                             }
-                        }
-                    };
+                            Err(_) => {
+                                error!("Failed to deserialize ClientCommand");
+                                ServerMessage::Error {
+                                    message: "Invalid command format",
+                                }
+                            }
+                        };
 
                     match serde_json::to_vec(&response) {
                         Ok(resp) => {
@@ -206,7 +202,7 @@ impl ws::WebSocketCallback for WebsocketHandler {
                                 .await
                                 .is_err()
                             {
-                                break; 
+                                break;
                             }
                         }
                         Err(_) => error!("Failed to serialize response"),
@@ -226,7 +222,7 @@ impl ws::WebSocketCallback for WebsocketHandler {
                                 .await
                                 .is_err()
                             {
-                                break; 
+                                break;
                             }
                         }
                         Err(_) => error!("Failed to serialize telemetry"),

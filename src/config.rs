@@ -6,7 +6,7 @@ use esp_hal::analog::adc;
 // ##################################################
 
 pub const OTHER_STACK_SIZE: usize = 4 * 1024;
-pub const MAIN_LOOP_DELAY_MS: u64 = 500;
+pub const MAIN_LOOP_DELAY_MS: u64 = 2;
 pub const LED_LEVEL: u8 = 10;
 pub const SMARTLED_RMT_FREQ_KHZ: u32 = 80_000;
 pub const MOTOR_PWM_FREQ_KHZ: u32 = 24;
@@ -45,16 +45,16 @@ pub const CALIBRATION_STEPS: usize = 10;
 pub const CALIBRATION_DELAY_MS: u64 = 1;
 
 pub const LINE_THRESHOLD: u16 = 800;
-pub const SENSOR_WEIGHT_THRESHOLD: u16 = 50;
-pub const SENSOR_LINE_SEEN_THRESHOLD: u16 = 200;
+pub const SENSOR_WEIGHT_THRESHOLD: u16 = 200;
+pub const SENSOR_LINE_SEEN_THRESHOLD: u16 = 500;
 
 pub const PID_KP: f32 = 0.005;
 pub const PID_KI: f32 = 0.0;
-pub const PID_KD: f32 = 0.025;
+pub const PID_KD: f32 = 0.035;
 
-pub const BASE_SPEED: u8 = 10;
-pub const MAX_SPEED: i32 = 30;
-pub const TURN_SPEED: u8 = 40;
+pub const BASE_SPEED: u8 = 70;
+pub const MAX_SPEED: i32 = 90;
+pub const TURN_SPEED: u8 = 90;
 
 // ##################################################
 // #      STORAGE CONFIG

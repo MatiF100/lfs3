@@ -24,6 +24,7 @@ use smart_leds::SmartLedsWrite;
 use smart_leds::brightness;
 use smart_leds::colors::RED;
 
+pub mod commands;
 pub mod config;
 pub mod control;
 pub mod http_server;
@@ -171,7 +172,7 @@ pub async fn run(spawner: Spawner) {
     let control_rcv = state::CONTROL_WATCH.receiver().unwrap();
     let tele_sender = state::TELEMETRY_CHANNEL.sender();
 
-    spawner.spawn(control::read_sensors()).unwrap();
+    //spawner.spawn(control::read_sensors()).unwrap();
     spawner
         .spawn(storage::telemetry(peripherals.FLASH, session))
         .unwrap();
